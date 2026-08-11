@@ -1,87 +1,76 @@
 import discord
-from discord import app_commands
 from discord.ext import commands
 import os
-import traceback
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
+# コマンドの接頭辞を ! にする
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-def is_admin(interaction: discord.Interaction) -> bool:
-    return (
-        interaction.user.guild_permissions.administrator
-        or interaction.user.id == interaction.guild.owner_id
-    )
+def is_admin(ctx: commands.Context) -> bool:
+    return ctx.author.guild_permissions.administrator or ctx.author.id == ctx.guild.owner_id
 
 
 @bot.event
 async def on_ready():
     print(f"[起動] Bot名: {bot.user}")
     print(f"[起動] 参加サーバー数: {len(bot.guilds)}")
-
-    if not bot.guilds:
-        print("[エラー] サーバーにBotが追加されていません。URLから招待し直してください。")
-        return
-
-    # 参加している全サーバーに対して個別にコマンドを登録
-    for guild in bot.guilds:
-        try:
-            bot.tree.copy_global_to(guild=discord.Object(id=guild.id))
-            synced = await bot.tree.sync(guild=discord.Object(id=guild.id))
-            print(f"[成功] サーバー「{guild.name}」(ID:{guild.id}) にコマンドを {len(synced)} 個登録完了")
-            for cmd in synced:
-                print(f"       - /{cmd.name}")
-        except Exception as e:
-            print(f"[失敗] サーバー「{guild.name}」でコマンド登録エラー: {e}")
-            traceback.print_exc()
-
-    print("[完了] 起動処理終了。Discord側に反映されるまで2～3分待ってください。")
+    print("[完了] 準備完了。 !disable @ロール / !enable @ロール が使えます。")
 
 
-@app_commands.command(name="disable-mention", description="指定ロールの@everyoneメンション・外部アプリ使用を強制OFF")
-@app_commands.describe(role="権限をOFFにするロールを選択")
-async def disable_mention(interaction: discord.Interaction, role: discord.Role):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ このコマンドは管理者のみ使用可能です。", ephemeral=True)
+@bot.command(name="disable", help="指定ロールの@everyoneメンション・外部アプリ使用をOFF")
+async def disable_perms(ctx: commands.Context, role: discord.Role):
+    if not is_admin(ctx):
+        await ctx.reply("❌ このコマンドは管理者のみ使用可能です。")
         return
 
     new_perms = role.permissions.copy()
     new_perms.update(mention_everyone=False, use_external_apps=False)
 
     try:
-        await role.edit(permissions=new_perms, reason=f"/disable-mention by {interaction.user}")
-        await interaction.response.send_message(
+        await role.edit(permissions=new_perms, reason=f"!disable by {ctx.author}")
+        await ctx.reply(
             f"✅ **{role.mention}** の権限を制限しました。\n"
             "@everyoneメンション: OFF\n"
             "外部アプリ使用: OFF"
         )
     except Exception as e:
-        await interaction.response.send_message(f"❌ 失敗: {e}", ephemeral=True)
+        await ctx.reply(f"❌ 失敗: {e}")
 
 
-@app_commands.command(name="enable-mention", description="指定ロールの@everyoneメンション・外部アプリ使用をONに戻す")
-@app_commands.describe(role="権限をONに戻すロールを選択")
-async def enable_mention(interaction: discord.Interaction, role: discord.Role):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ このコマンドは管理者のみ使用可能です。", ephemeral=True)
+@bot.command(name="enable", help="指定ロールの@everyoneメンション・外部アプリ使用をON")
+async def enable_perms(ctx: commands.Context, role: discord.Role):
+    if not is_admin(ctx):
+        await ctx.reply("❌ このコマンドは管理者のみ使用可能です。")
         return
 
     new_perms = role.permissions.copy()
     new_perms.update(mention_everyone=True, use_external_apps=True)
 
     try:
-        await role.edit(permissions=new_perms, reason=f"/enable-mention by {interaction.user}")
-        await interaction.response.send_message(
+        await role.edit(permissions=new_perms, reason=f"!enable by {ctx.author}")
+        await ctx.reply(
             f"✅ **{role.mention}** の権限を復元しました。\n"
             "@everyoneメンション: ON\n"
             "外部アプリ使用: ON"
         )
     except Exception as e:
-        await interaction.response.send_message(f"❌ 失敗: {e}", ephemeral=True)
+        await ctx.reply(f"❌ 失敗: {e}")
+
+
+# コマンドのエラー処理（ロールを指定しなかった場合など）
+@disable_perms.error
+@enable_perms.error
+async def cmd_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.reply("❌ 使い方: `!disable @ロール` または `!enable @ロール`")
+    elif isinstance(error, commands.RoleNotFound):
+        await ctx.reply("❌ ロールが見つかりません。@でロールを指定してください。")
+    else:
+        await ctx.reply(f"❌ エラー: {error}")
 
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
