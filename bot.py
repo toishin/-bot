@@ -2,7 +2,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import os
-
+print("===== 起動確認 =====")
+print(f"DISCORD_BOT_TOKEN 設定済み？ → {bool(os.environ.get('DISCORD_BOT_TOKEN'))}")
+print(f"ファイルの存在確認: bot.py → {os.path.exists('/app/bot.py')}")
+print("====================")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
