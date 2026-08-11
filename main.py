@@ -10,16 +10,14 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 def is_admin(ctx: commands.Context) -> bool:
-    """管理者かどうかを判定：administrator権限 または サーバーオーナー のみ許可"""
     if not ctx.guild:
-        return False  # DMでは実行不可
+        return False
     return (
         ctx.author.guild_permissions.administrator
         or ctx.author.id == ctx.guild.owner_id
     )
 
 
-# コマンド用チェックデコレータ：これをつけたコマンドは管理者以外エラーになる
 admin_only = commands.check(is_admin)
 
 
@@ -27,13 +25,10 @@ async def find_single_target(ctx: commands.Context, query: str):
     query = query.strip()
     if not query:
         return None
-
     if query.lower() == "all":
         return ("all", None)
-
     if query.lower() in ("everyone", "@everyone"):
         return ("roles", [ctx.guild.default_role])
-
     if query.startswith("<@") and query.endswith(">"):
         try:
             uid = int(query.lstrip("<@!").rstrip(">"))
@@ -43,7 +38,6 @@ async def find_single_target(ctx: commands.Context, query: str):
                 return ("roles", roles)
         except ValueError:
             pass
-
     if query.startswith("<@&") and query.endswith(">"):
         try:
             rid = int(query[3:-1])
@@ -51,7 +45,6 @@ async def find_single_target(ctx: commands.Context, query: str):
             return ("roles", [r]) if r else None
         except ValueError:
             pass
-
     if query.isdigit():
         try:
             n = int(query)
@@ -64,7 +57,6 @@ async def find_single_target(ctx: commands.Context, query: str):
                 return ("roles", roles)
         except ValueError:
             pass
-
     q = query.lower()
     for r in ctx.guild.roles:
         if r.name.lower() == q:
@@ -80,14 +72,17 @@ async def find_single_target(ctx: commands.Context, query: str):
         if q in m.display_name.lower() or q in m.name.lower():
             roles = [r for r in m.roles if r != ctx.guild.default_role]
             return ("roles", roles)
-
     return None
 
 
 async def resolve_targets(ctx: commands.Context, args_str: str):
-    tokens = [t.strip() for t in args_str.replace(",", " ").split() if t.strip()]
+    # フラグを除去したトークンを作成
+    raw_tokens = [t.strip() for t in args_str.replace(",", " ").split() if t.strip()]
+    flags = {t.lower() for t in raw_tokens if t.startswith("--")}
+    tokens = [t for t in raw_tokens if not t.startswith("--")]
+
     if not tokens:
-        return [], "引数がありません。"
+        return [], flags, "引数がありません。"
 
     result_roles = []
     messages = []
@@ -97,10 +92,9 @@ async def resolve_targets(ctx: commands.Context, args_str: str):
         if resolved is None:
             messages.append(f"❌ `{tok}` が見つかりません")
             continue
-
         kind, data = resolved
         if kind == "all":
-            everyone_flag = "--everyone" in args_str.lower()
+            everyone_flag = "--everyone" in flags
             all_roles = list(ctx.guild.roles)
             if not everyone_flag:
                 all_roles = [r for r in all_roles if r != ctx.guild.default_role]
@@ -118,31 +112,85 @@ async def resolve_targets(ctx: commands.Context, args_str: str):
             seen.add(r.id)
             unique.append(r)
 
-    return unique, "\n".join(messages)
+    return unique, flags, "\n".join(messages)
+
+
+async def overwrite_channel_perms(guild: discord.Guild, roles: list[discord.Role], *, disable: bool, force_deny: bool):
+    """全チャンネル・カテゴリの権限上書きを修正"""
+    modified = []
+    failed = []
+
+    # 対象とする全チャンネル（カテゴリ + テキスト + スレッド親）
+    targets = []
+    for category in guild.categories:
+        targets.append(category)
+    for channel in guild.text_channels:
+        targets.append(channel)
+    for channel in guild.voice_channels:
+        targets.append(channel)
+
+    for ch in targets:
+        for role in roles:
+            overwrite = ch.overwrites_for(role)
+            changed = False
+
+            # mention_everyone
+            if disable:
+                # OFFにしたい → 上書きで許可(True)になっているものを修正
+                if overwrite.mention_everyone is True:
+                    overwrite.mention_everyone = False if force_deny else None
+                    changed = True
+                if overwrite.use_external_apps is True:
+                    overwrite.use_external_apps = False if force_deny else None
+                    changed = True
+            else:
+                # ONにしたい → 上書きで拒否(False)になっているものを中立に戻す
+                if overwrite.mention_everyone is False:
+                    overwrite.mention_everyone = None
+                    changed = True
+                if overwrite.use_external_apps is False:
+                    overwrite.use_external_apps = None
+                    changed = True
+
+            if changed:
+                try:
+                    await ch.set_permissions(role, overwrite=overwrite, reason=f"権限一括修正 by Bot")
+                    modified.append(f"{ch.mention} / {role.name}")
+                except Exception as e:
+                    failed.append(f"{ch.mention} / {role.name}: {e}")
+
+    return modified, failed
 
 
 @bot.event
 async def on_ready():
     print(f"[起動] Bot名: {bot.user}")
     print(f"[起動] 参加サーバー数: {len(bot.guilds)}")
-    print("[完了] 準備完了。 !disable / !enable は管理者のみ使用可能です。")
+    print("[完了] 準備完了。!disable / !enable は管理者のみ使用可能。")
 
 
 async def run_batch(ctx: commands.Context, args_str: str, *, disable: bool):
-    # 【二重チェック】デコレータで弾かれるはずだが、保険としてここでも再度確認
     if not is_admin(ctx):
-        await ctx.reply("⛔ この操作はサーバー管理者のみ実行可能です。", delete_after=10)
+        await ctx.reply("⛔ サーバー管理者のみ実行可能です。", delete_after=10)
         return
 
-    roles, info = await resolve_targets(ctx, args_str)
+    roles, flags, info = await resolve_targets(ctx, args_str)
+    deep = "--deep" in flags
+    force_deny = "--deny" in flags
+
     header = f"🔍 対象解決結果（{len(roles)}個）:\n{info}"
+    if deep:
+        header += "\n⚡ --deep: チャンネル個別の権限上書きも修正します"
+    if force_deny and disable:
+        header += "\n🛑 --deny: チャンネル上書きを「許可」→「拒否」に強制変更します"
 
     if not roles:
         await ctx.reply(header + "\n\n❌ 操作するロールが1つもありません。")
         return
 
-    success = []
-    failed = []
+    # 1. ロールの基本権限を変更
+    success_role = []
+    failed_role = []
 
     for role in roles:
         new_perms = discord.Permissions(role.permissions.value)
@@ -152,54 +200,81 @@ async def run_batch(ctx: commands.Context, args_str: str, *, disable: bool):
         )
         try:
             label = "disable" if disable else "enable"
-            await role.edit(permissions=new_perms, reason=f"!{label} by {ctx.author} (管理者実行)")
-            success.append(role)
+            await role.edit(permissions=new_perms, reason=f"!{label} by {ctx.author}")
+            success_role.append(role)
         except discord.Forbidden:
-            failed.append((role, "Botの権限不足（Bot自身のロールを対象ロールより上に移動してください）"))
+            failed_role.append((role, "Botの権限不足（ロールの順番を確認）"))
         except Exception as e:
-            failed.append((role, str(e)))
+            failed_role.append((role, str(e)))
 
+    # 2. --deep があればチャンネル上書きも修正
+    ch_modified = []
+    ch_failed = []
+    if deep:
+        ch_modified, ch_failed = await overwrite_channel_perms(
+            ctx.guild, roles, disable=disable, force_deny=force_deny
+        )
+
+    # 結果表示
     mode = "🔒 制限（OFF）" if disable else "🔓 復元（ON）"
     lines = [f"## {mode} 実行結果（実行者: {ctx.author.display_name}）", ""]
-    lines.append(f"対象ロール数: {len(roles)} / 成功: {len(success)} / 失敗: {len(failed)}")
+    lines.append(f"対象ロール数: {len(roles)} / 基本権限 成功:{len(success_role)} 失敗:{len(failed_role)}")
+    if deep:
+        lines.append(f"チャンネル上書き 修正:{len(ch_modified)}件 / 失敗:{len(ch_failed)}件")
     lines.append("")
-    if success:
-        lines.append("### ✅ 成功")
-        lines.append(", ".join(r.mention for r in success))
+
+    if success_role:
+        lines.append("### ✅ 基本権限 成功")
+        lines.append(", ".join(r.mention for r in success_role))
         lines.append("")
-    if failed:
-        lines.append("### ❌ 失敗")
-        for r, reason in failed:
+    if failed_role:
+        lines.append("### ❌ 基本権限 失敗")
+        for r, reason in failed_role:
             lines.append(f"- {r.mention}: {reason}")
+        lines.append("")
+    if deep and ch_modified:
+        lines.append("### ⚡ チャンネル上書き 修正完了")
+        lines.append(f"計 {len(ch_modified)} 件のチャンネル×ロールの組み合わせを修正")
+        if len(ch_modified) <= 20:
+            for m in ch_modified:
+                lines.append(f"- {m}")
+        else:
+            lines.append("（件数が多いため一覧省略）")
+        lines.append("")
+    if deep and ch_failed:
+        lines.append("### ❌ チャンネル上書き 失敗")
+        for f in ch_failed[:30]:
+            lines.append(f"- {f}")
+        lines.append("")
 
     await ctx.reply("\n".join(lines))
 
 
-# 各コマンドに @admin_only を付ける → 管理者以外はそもそも起動しない
-@bot.command(name="disable", help="【管理者専用】ロール/メンバー/all をまとめて権限制限")
+@bot.command(name="disable", help="【管理者専用】ロールの権限を一括OFF。--deepでチャンネル上書きも修正")
 @admin_only
 async def disable_cmd(ctx: commands.Context, *, args: str):
     await run_batch(ctx, args, disable=True)
 
 
-@bot.command(name="enable", help="【管理者専用】ロール/メンバー/all をまとめて権限復元")
+@bot.command(name="enable", help="【管理者専用】ロールの権限を一括ON。--deepでチャンネル上書きも戻す")
 @admin_only
 async def enable_cmd(ctx: commands.Context, *, args: str):
     await run_batch(ctx, args, disable=False)
 
 
-# 管理者権限が無い場合のエラーを親切に表示
 @bot.event
 async def on_command_error(ctx: commands.Context, error):
     if isinstance(error, commands.CheckFailure):
-        await ctx.reply("⛔ このコマンドはサーバー管理者のみ使用可能です。権限がありません。", delete_after=10)
+        await ctx.reply("⛔ このコマンドはサーバー管理者のみ使用可能です。", delete_after=10)
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.reply(
             "❌ 使い方（管理者のみ）:\n"
-            "・複数ロール: `!disable ロールA ロールB`\n"
+            "・基本: `!disable ロールA ロールB`\n"
             "・メンバー指定: `!disable @ユーザー`\n"
             "・全ロール: `!disable all`\n"
-            "・@everyoneも含む: `!disable all --everyone`"
+            "・@everyone含む: `!disable all --everyone`\n"
+            "・チャンネル上書きも修正: `!disable everyone --deep`\n"
+            "・更に強制拒否: `!disable everyone --deep --deny`"
         )
     else:
         await ctx.reply(f"❌ エラー: {error}")
