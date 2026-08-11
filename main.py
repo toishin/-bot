@@ -75,26 +75,41 @@ async def find_single_target(ctx: commands.Context, query: str):
     return None
 
 
-async def resolve_targets(ctx: commands.Context, args_str: str):
-    # フラグを除去したトークンを作成
-    raw_tokens = [t.strip() for t in args_str.replace(",", " ").split() if t.strip()]
-    flags = {t.lower() for t in raw_tokens if t.startswith("--")}
-    tokens = [t for t in raw_tokens if not t.startswith("--")]
+def normalize_flag(s: str) -> str:
+    """長いダッシュを普通のハイフンに置き換え、前後の余分な記号を削除"""
+    return s.strip().replace("—", "-").lstrip("-")
 
-    if not tokens:
+
+async def resolve_targets(ctx: commands.Context, args_str: str):
+    # 改行や複数スペースを正規化
+    raw_tokens = args_str.replace("\n", " ").split()
+    raw_tokens = [t.strip() for t in raw_tokens if t.strip()]
+
+    flags = set()
+    role_tokens = []
+
+    for tok in raw_tokens:
+        # ダッシュ1つまたは2つで始まるもの → フラグとして処理
+        if tok.startswith("-") or tok.startswith("—"):
+            flag_name = normalize_flag(tok).lower()
+            flags.add(flag_name)
+        else:
+            role_tokens.append(tok)
+
+    if not role_tokens:
         return [], flags, "引数がありません。"
 
     result_roles = []
     messages = []
 
-    for tok in tokens:
+    for tok in role_tokens:
         resolved = await find_single_target(ctx, tok)
         if resolved is None:
             messages.append(f"❌ `{tok}` が見つかりません")
             continue
         kind, data = resolved
         if kind == "all":
-            everyone_flag = "--everyone" in flags
+            everyone_flag = "everyone" in flags
             all_roles = list(ctx.guild.roles)
             if not everyone_flag:
                 all_roles = [r for r in all_roles if r != ctx.guild.default_role]
@@ -116,11 +131,9 @@ async def resolve_targets(ctx: commands.Context, args_str: str):
 
 
 async def overwrite_channel_perms(guild: discord.Guild, roles: list[discord.Role], *, disable: bool, force_deny: bool):
-    """全チャンネル・カテゴリの権限上書きを修正"""
     modified = []
     failed = []
 
-    # 対象とする全チャンネル（カテゴリ + テキスト + スレッド親）
     targets = []
     for category in guild.categories:
         targets.append(category)
@@ -134,9 +147,7 @@ async def overwrite_channel_perms(guild: discord.Guild, roles: list[discord.Role
             overwrite = ch.overwrites_for(role)
             changed = False
 
-            # mention_everyone
             if disable:
-                # OFFにしたい → 上書きで許可(True)になっているものを修正
                 if overwrite.mention_everyone is True:
                     overwrite.mention_everyone = False if force_deny else None
                     changed = True
@@ -144,7 +155,6 @@ async def overwrite_channel_perms(guild: discord.Guild, roles: list[discord.Role
                     overwrite.use_external_apps = False if force_deny else None
                     changed = True
             else:
-                # ONにしたい → 上書きで拒否(False)になっているものを中立に戻す
                 if overwrite.mention_everyone is False:
                     overwrite.mention_everyone = None
                     changed = True
@@ -175,8 +185,8 @@ async def run_batch(ctx: commands.Context, args_str: str, *, disable: bool):
         return
 
     roles, flags, info = await resolve_targets(ctx, args_str)
-    deep = "--deep" in flags
-    force_deny = "--deny" in flags
+    deep = "deep" in flags
+    force_deny = "deny" in flags
 
     header = f"🔍 対象解決結果（{len(roles)}個）:\n{info}"
     if deep:
@@ -188,7 +198,6 @@ async def run_batch(ctx: commands.Context, args_str: str, *, disable: bool):
         await ctx.reply(header + "\n\n❌ 操作するロールが1つもありません。")
         return
 
-    # 1. ロールの基本権限を変更
     success_role = []
     failed_role = []
 
@@ -207,7 +216,6 @@ async def run_batch(ctx: commands.Context, args_str: str, *, disable: bool):
         except Exception as e:
             failed_role.append((role, str(e)))
 
-    # 2. --deep があればチャンネル上書きも修正
     ch_modified = []
     ch_failed = []
     if deep:
@@ -215,7 +223,6 @@ async def run_batch(ctx: commands.Context, args_str: str, *, disable: bool):
             ctx.guild, roles, disable=disable, force_deny=force_deny
         )
 
-    # 結果表示
     mode = "🔒 制限（OFF）" if disable else "🔓 復元（ON）"
     lines = [f"## {mode} 実行結果（実行者: {ctx.author.display_name}）", ""]
     lines.append(f"対象ロール数: {len(roles)} / 基本権限 成功:{len(success_role)} 失敗:{len(failed_role)}")
@@ -250,13 +257,13 @@ async def run_batch(ctx: commands.Context, args_str: str, *, disable: bool):
     await ctx.reply("\n".join(lines))
 
 
-@bot.command(name="disable", help="【管理者専用】ロールの権限を一括OFF。--deepでチャンネル上書きも修正")
+@bot.command(name="disable", help="【管理者専用】ロールの権限を一括OFF。-deepで上書き修正、-denyで強制拒否")
 @admin_only
 async def disable_cmd(ctx: commands.Context, *, args: str):
     await run_batch(ctx, args, disable=True)
 
 
-@bot.command(name="enable", help="【管理者専用】ロールの権限を一括ON。--deepでチャンネル上書きも戻す")
+@bot.command(name="enable", help="【管理者専用】ロールの権限を一括ON。-deepで上書き修正")
 @admin_only
 async def enable_cmd(ctx: commands.Context, *, args: str):
     await run_batch(ctx, args, disable=False)
@@ -270,11 +277,8 @@ async def on_command_error(ctx: commands.Context, error):
         await ctx.reply(
             "❌ 使い方（管理者のみ）:\n"
             "・基本: `!disable ロールA ロールB`\n"
-            "・メンバー指定: `!disable @ユーザー`\n"
-            "・全ロール: `!disable all`\n"
-            "・@everyone含む: `!disable all --everyone`\n"
-            "・チャンネル上書きも修正: `!disable everyone --deep`\n"
-            "・更に強制拒否: `!disable everyone --deep --deny`"
+            "・チャンネル上書きも修正: `!disable everyone -deep`\n"
+            "・強制拒否: `!disable everyone -deep -deny`"
         )
     else:
         await ctx.reply(f"❌ エラー: {error}")
