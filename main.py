@@ -18,7 +18,7 @@ SPAM_THRESHOLD = 5               # 件数：これ以上でスパム判定
 TIMEOUT_DURATION = 24 * 60 * 60  # 24時間（秒）
 
 # 複数アカウント 類似メッセージ検知
-GROUP_WINDOW = 8                  # 秒：同じメッセージとみなす時間幅
+GROUP_WINDOW = 4                  # 秒：同じメッセージとみなす時間幅
 GROUP_SIMILARITY = 0.80           # 類似度 0.0～1.0
 GROUP_COUNT = 2                   # 何アカウント以上で発動
 
